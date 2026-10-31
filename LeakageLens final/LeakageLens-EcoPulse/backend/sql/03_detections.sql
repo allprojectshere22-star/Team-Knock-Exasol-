@@ -1,0 +1,223 @@
+-- Step 3 - the detection queries. Each statement joins the loaded tables inside Exasol and returns one row per finding.
+-- GENERATED from database/detections/*.sql (the same queries the app runs). Do not edit by hand; re-run backend/build_sql_script.py.
+-- Overbilling tolerance is 0.02 (2%). Edit the number to change it. Fuzzy candidates are only narrowed by SQL here;
+-- the app and CLI score them with RapidFuzz.
+
+-- ===== DUPLICATE INVOICES =====
+SELECT
+    'INV-DUP-' || a.INVOICE_ID || '-' || b.INVOICE_ID AS FINDING_ID,
+    'Duplicate invoice' AS CATEGORY, a.INVOICE_ID,
+    CASE WHEN a.PO_ID = b.PO_ID THEN a.PO_ID ELSE a.PO_ID || '|' || b.PO_ID END AS PO_ID,
+    CAST(NULL AS VARCHAR(500)) AS PAYMENT_IDS, CAST(NULL AS VARCHAR(500)) AS CREDIT_IDS,
+    a.AMOUNT AS EXPECTED_AMOUNT, a.AMOUNT + b.AMOUNT AS OBSERVED_AMOUNT,
+    b.AMOUNT AS DIFFERENCE, 0.9600 AS CONFIDENCE,
+    'Same supplier and normalized invoice reference; amounts and dates are corroborated before human review.'
+        AS EXPLANATION,
+    'Compare the source invoice images and supplier ledger before approving or recovering payment.' AS NEXT_ACTION,
+    CASE WHEN a.PO_ID = b.PO_ID THEN 'PO references match; ' ELSE 'PO references differ; ' END ||
+    CASE WHEN UPPER(TRIM(a.DESCRIPTION)) = UPPER(TRIM(b.DESCRIPTION))
+         THEN 'normalized descriptions match.' ELSE 'descriptions differ.' END ||
+    ' Amounts: ' || CAST(a.AMOUNT AS VARCHAR(50)) || ' and ' || CAST(b.AMOUNT AS VARCHAR(50)) || '; dates: ' ||
+    CAST(a.INVOICE_DATE AS VARCHAR(10)) || ' and ' || CAST(b.INVOICE_DATE AS VARCHAR(10)) ||
+    '. Invoice references normalized by removing punctuation.' AS EVIDENCE_TEXT,
+    a.INVOICE_ID || '|' || b.INVOICE_ID AS SOURCE_IDS,
+    a.SUPPLIER_ID AS SUPPLIER_ID, a.CURRENCY AS CURRENCY
+FROM LEAKAGELENS.INVOICES a
+JOIN LEAKAGELENS.INVOICES b
+  ON a.SUPPLIER_ID = b.SUPPLIER_ID AND b.INVOICE_ID > a.INVOICE_ID
+ AND REGEXP_REPLACE(UPPER(a.INVOICE_NUMBER), '[^A-Z0-9]', '') =
+     REGEXP_REPLACE(UPPER(b.INVOICE_NUMBER), '[^A-Z0-9]', '')
+ AND ABS(a.AMOUNT - b.AMOUNT) <= GREATEST(a.AMOUNT, b.AMOUNT) * 0.02
+ AND b.INVOICE_DATE BETWEEN a.INVOICE_DATE - 45 AND a.INVOICE_DATE + 45
+WHERE a.CURRENCY = b.CURRENCY;
+
+-- ===== DUPLICATE PAYMENTS =====
+-- Exclude reversals and only report a repeated pair when the pair exceeds the invoice payable.
+WITH open_credits AS (
+    SELECT INVOICE_ID, SUM(CASE WHEN APPLIED = FALSE THEN AMOUNT ELSE 0 END) AS CREDIT_AMOUNT
+    FROM LEAKAGELENS.CREDIT_NOTES GROUP BY INVOICE_ID
+)
+SELECT
+    'PAY-DUP-' || p1.PAYMENT_ID || '-' || p2.PAYMENT_ID AS FINDING_ID,
+    'Duplicate payment' AS CATEGORY, p1.INVOICE_ID, i.PO_ID,
+    p1.PAYMENT_ID || '|' || p2.PAYMENT_ID AS PAYMENT_IDS, CAST(NULL AS VARCHAR(500)) AS CREDIT_IDS,
+    p1.AMOUNT AS EXPECTED_AMOUNT, p1.AMOUNT + p2.AMOUNT AS OBSERVED_AMOUNT,
+    p2.AMOUNT AS DIFFERENCE, 0.9900 AS CONFIDENCE,
+    'Two settled payments reference the same invoice for the same amount; neither is a reversal.'
+        AS EXPLANATION,
+    'Verify the supplier statement and recover the repeated settlement if confirmed.' AS NEXT_ACTION,
+    'Matched settled payment pair; same invoice and amount.' AS EVIDENCE_TEXT,
+    p1.PAYMENT_ID || '|' || p2.PAYMENT_ID AS SOURCE_IDS,
+    i.SUPPLIER_ID AS SUPPLIER_ID, i.CURRENCY AS CURRENCY
+FROM LEAKAGELENS.PAYMENTS p1
+JOIN LEAKAGELENS.PAYMENTS p2
+  ON p2.INVOICE_ID = p1.INVOICE_ID AND p2.PAYMENT_ID > p1.PAYMENT_ID
+ AND p2.AMOUNT = p1.AMOUNT
+ AND p2.PAYMENT_DATE BETWEEN p1.PAYMENT_DATE - 45 AND p1.PAYMENT_DATE + 45
+JOIN LEAKAGELENS.INVOICES i ON i.INVOICE_ID = p1.INVOICE_ID
+LEFT JOIN open_credits c ON c.INVOICE_ID = i.INVOICE_ID
+WHERE p1.STATUS = 'SETTLED' AND p2.STATUS = 'SETTLED'
+  AND p1.REVERSAL_OF IS NULL AND p2.REVERSAL_OF IS NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM LEAKAGELENS.PAYMENTS r
+      WHERE r.REVERSAL_OF IN (p1.PAYMENT_ID, p2.PAYMENT_ID)
+  )
+  AND p1.AMOUNT + p2.AMOUNT > i.AMOUNT - COALESCE(c.CREDIT_AMOUNT, 0);
+
+-- ===== OVERBILLING =====
+SELECT
+    'OVER-' || i.INVOICE_ID AS FINDING_ID, 'Overbilling' AS CATEGORY,
+    i.INVOICE_ID, po.PO_ID, CAST(NULL AS VARCHAR(500)) AS PAYMENT_IDS,
+    CAST(NULL AS VARCHAR(500)) AS CREDIT_IDS,
+    po.APPROVED_AMOUNT AS EXPECTED_AMOUNT, i.AMOUNT AS OBSERVED_AMOUNT,
+    i.AMOUNT - po.APPROVED_AMOUNT AS DIFFERENCE, 0.9800 AS CONFIDENCE,
+    'Invoice amount exceeds its approved purchase order by more than the configured tolerance.'
+        AS EXPLANATION,
+    'Check PO amendments, delivery records and tax treatment; dispute the unsupported balance.' AS NEXT_ACTION,
+    'Approved PO amount, invoice amount, currency and configured tolerance compared in Exasol.'
+        AS EVIDENCE_TEXT,
+    i.INVOICE_ID || '|' || po.PO_ID AS SOURCE_IDS,
+    i.SUPPLIER_ID AS SUPPLIER_ID, i.CURRENCY AS CURRENCY
+FROM LEAKAGELENS.INVOICES i
+JOIN LEAKAGELENS.PURCHASE_ORDERS po ON po.PO_ID = i.PO_ID
+WHERE po.STATUS = 'APPROVED' AND po.CURRENCY = i.CURRENCY
+  AND i.AMOUNT - po.APPROVED_AMOUNT > GREATEST(po.APPROVED_AMOUNT, 1) * 0.02;
+
+-- ===== MISSED CREDITS =====
+SELECT
+    'CREDIT-' || c.CREDIT_ID AS FINDING_ID, 'Missed credit note' AS CATEGORY,
+    c.INVOICE_ID, i.PO_ID, CAST(NULL AS VARCHAR(500)) AS PAYMENT_IDS, c.CREDIT_ID AS CREDIT_IDS,
+    c.AMOUNT AS EXPECTED_AMOUNT, CAST(0 AS DECIMAL(18,2)) AS OBSERVED_AMOUNT,
+    c.AMOUNT AS DIFFERENCE, 0.9700 AS CONFIDENCE,
+    'Supplier credit note is marked unapplied and is linked to an invoice.'
+        AS EXPLANATION,
+    'Apply the credit to the supplier balance or request a remittance correction.' AS NEXT_ACTION,
+    'Credit note application status, amount and linked invoice checked in Exasol.' AS EVIDENCE_TEXT,
+    c.CREDIT_ID || '|' || c.INVOICE_ID AS SOURCE_IDS,
+    c.SUPPLIER_ID AS SUPPLIER_ID, c.CURRENCY AS CURRENCY
+FROM LEAKAGELENS.CREDIT_NOTES c
+JOIN LEAKAGELENS.INVOICES i ON i.INVOICE_ID = c.INVOICE_ID
+JOIN (
+    SELECT p.INVOICE_ID, SUM(p.AMOUNT) AS SETTLED_AMOUNT
+    FROM LEAKAGELENS.PAYMENTS p
+    WHERE p.STATUS = 'SETTLED' AND p.REVERSAL_OF IS NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM LEAKAGELENS.PAYMENTS r WHERE r.REVERSAL_OF = p.PAYMENT_ID
+      )
+    GROUP BY p.INVOICE_ID
+) p ON p.INVOICE_ID = c.INVOICE_ID
+WHERE c.APPLIED = FALSE
+  AND p.SETTLED_AMOUNT > i.AMOUNT - c.AMOUNT
+  AND p.SETTLED_AMOUNT <= i.AMOUNT;
+
+-- ===== PAYMENT MISMATCHES =====
+WITH invoice_balances AS (
+    SELECT i.INVOICE_ID, i.SUPPLIER_ID, i.CURRENCY, i.PO_ID, i.AMOUNT AS INVOICE_AMOUNT, i.DUE_DATE,
+           COALESCE(c.AMOUNT, 0) AS OPEN_CREDITS,
+           COALESCE(p.AMOUNT, 0) AS SETTLED_PAYMENTS,
+           p.PAYMENT_IDS, c.CREDIT_IDS
+    FROM LEAKAGELENS.INVOICES i
+    LEFT JOIN (
+        SELECT p.INVOICE_ID, SUM(p.AMOUNT) AS AMOUNT,
+               LISTAGG(PAYMENT_ID, '|') WITHIN GROUP (ORDER BY PAYMENT_ID) AS PAYMENT_IDS
+        FROM LEAKAGELENS.PAYMENTS p
+        WHERE p.STATUS = 'SETTLED' AND p.REVERSAL_OF IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM LEAKAGELENS.PAYMENTS r
+              WHERE r.REVERSAL_OF = p.PAYMENT_ID
+          )
+        GROUP BY p.INVOICE_ID
+    ) p ON p.INVOICE_ID = i.INVOICE_ID
+    LEFT JOIN (
+        SELECT INVOICE_ID, SUM(CASE WHEN APPLIED = FALSE THEN AMOUNT ELSE 0 END) AS AMOUNT,
+               LISTAGG(CASE WHEN APPLIED = FALSE THEN CREDIT_ID END, '|')
+                   WITHIN GROUP (ORDER BY CREDIT_ID) AS CREDIT_IDS
+        FROM LEAKAGELENS.CREDIT_NOTES GROUP BY INVOICE_ID
+    ) c ON c.INVOICE_ID = i.INVOICE_ID
+), expected AS (
+    SELECT INVOICE_ID, SUPPLIER_ID, CURRENCY, PO_ID, DUE_DATE, INVOICE_AMOUNT,
+           COALESCE(OPEN_CREDITS, 0) AS OPEN_CREDITS,
+           COALESCE(SETTLED_PAYMENTS, 0) AS SETTLED_PAYMENTS,
+           PAYMENT_IDS, CREDIT_IDS, INVOICE_AMOUNT - COALESCE(OPEN_CREDITS, 0) AS EXPECTED_PAYABLE,
+           ABS(INVOICE_AMOUNT - COALESCE(OPEN_CREDITS, 0) - COALESCE(SETTLED_PAYMENTS, 0)) AS GAP
+    FROM invoice_balances
+)
+SELECT
+    'MISMATCH-' || INVOICE_ID AS FINDING_ID, 'Payment mismatch' AS CATEGORY,
+    INVOICE_ID, PO_ID, PAYMENT_IDS, CREDIT_IDS,
+    EXPECTED_PAYABLE AS EXPECTED_AMOUNT, SETTLED_PAYMENTS AS OBSERVED_AMOUNT,
+    EXPECTED_PAYABLE - SETTLED_PAYMENTS AS DIFFERENCE, 0.9000 AS CONFIDENCE,
+    'Net invoice payable after unapplied credits differs from settled payments by more than the tolerance.'
+        AS EXPLANATION,
+    'Reconcile the remittance, credit application and payment status with the supplier statement.' AS NEXT_ACTION,
+    'Invoice less unapplied credits compared with settled, non-reversal payments.' AS EVIDENCE_TEXT,
+    INVOICE_ID || '|' || COALESCE(PAYMENT_IDS, '') || '|' || COALESCE(CREDIT_IDS, '') AS SOURCE_IDS,
+    SUPPLIER_ID, CURRENCY
+FROM expected
+WHERE GAP > GREATEST(EXPECTED_PAYABLE, 1) * 0.02
+  AND SETTLED_PAYMENTS > 0
+  AND (SETTLED_PAYMENTS > EXPECTED_PAYABLE OR DUE_DATE < CURRENT_DATE)
+  AND NOT EXISTS (
+      SELECT 1
+      FROM LEAKAGELENS.PAYMENTS p1
+      JOIN LEAKAGELENS.PAYMENTS p2
+        ON p2.INVOICE_ID = p1.INVOICE_ID AND p2.PAYMENT_ID > p1.PAYMENT_ID
+       AND p2.AMOUNT = p1.AMOUNT
+       AND p2.PAYMENT_DATE BETWEEN p1.PAYMENT_DATE - 45 AND p1.PAYMENT_DATE + 45
+      WHERE p1.INVOICE_ID = expected.INVOICE_ID
+        AND p1.STATUS = 'SETTLED' AND p2.STATUS = 'SETTLED'
+        AND p1.REVERSAL_OF IS NULL AND p2.REVERSAL_OF IS NULL
+        AND NOT EXISTS (
+            SELECT 1 FROM LEAKAGELENS.PAYMENTS r
+            WHERE r.REVERSAL_OF IN (p1.PAYMENT_ID, p2.PAYMENT_ID)
+        )
+        AND p1.AMOUNT + p2.AMOUNT > expected.EXPECTED_PAYABLE
+  );
+
+-- ===== UNMATCHED PAYMENTS =====
+SELECT
+    'UNMATCHED-' || p.PAYMENT_ID AS FINDING_ID,
+    'Unmatched payment' AS CATEGORY,
+    CAST(NULL AS VARCHAR(100)) AS INVOICE_ID,
+    CAST(NULL AS VARCHAR(250)) AS PO_ID,
+    p.PAYMENT_ID AS PAYMENT_IDS,
+    CAST(NULL AS VARCHAR(500)) AS CREDIT_IDS,
+    CAST(0 AS DECIMAL(18,2)) AS EXPECTED_AMOUNT,
+    p.AMOUNT AS OBSERVED_AMOUNT,
+    p.AMOUNT AS DIFFERENCE,
+    0.5500 AS CONFIDENCE,
+    'Completed payment has no invoice reference that matches a loaded invoice. The amount is not treated as recoverable.'
+        AS EXPLANATION,
+    'Review remittance advice and advance-payment records before allocating this payment.' AS NEXT_ACTION,
+    'Payment ID, supplier, status, and invoice reference checked against loaded invoices.' AS EVIDENCE_TEXT,
+    p.PAYMENT_ID AS SOURCE_IDS,
+    p.SUPPLIER_ID AS SUPPLIER_ID, p.CURRENCY AS CURRENCY
+FROM LEAKAGELENS.PAYMENTS p
+LEFT JOIN LEAKAGELENS.INVOICES i ON i.INVOICE_ID = p.INVOICE_ID
+WHERE p.STATUS = 'SETTLED'
+  AND p.REVERSAL_OF IS NULL
+  AND i.INVOICE_ID IS NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM LEAKAGELENS.PAYMENTS r
+      WHERE r.REVERSAL_OF = p.PAYMENT_ID
+  );
+
+-- ===== FUZZY INVOICE CANDIDATES =====
+-- SQL narrows the candidate space; RapidFuzz scores only these candidates in Python.
+SELECT a.INVOICE_ID AS LEFT_ID, b.INVOICE_ID AS RIGHT_ID,
+       a.SUPPLIER_ID AS LEFT_SUPPLIER_ID, b.SUPPLIER_ID AS RIGHT_SUPPLIER_ID,
+       a.INVOICE_NUMBER AS LEFT_REFERENCE, b.INVOICE_NUMBER AS RIGHT_REFERENCE,
+       a.SUPPLIER_NAME AS LEFT_SUPPLIER, b.SUPPLIER_NAME AS RIGHT_SUPPLIER,
+       a.DESCRIPTION AS LEFT_DESCRIPTION, b.DESCRIPTION AS RIGHT_DESCRIPTION,
+       a.PO_ID AS LEFT_PO, b.PO_ID AS RIGHT_PO,
+       a.AMOUNT AS LEFT_AMOUNT, b.AMOUNT AS RIGHT_AMOUNT,
+       a.INVOICE_DATE AS LEFT_DATE, b.INVOICE_DATE AS RIGHT_DATE,
+       a.CURRENCY AS CURRENCY, a.SUPPLIER_ID AS SUPPLIER_ID
+FROM LEAKAGELENS.INVOICES a
+JOIN LEAKAGELENS.INVOICES b
+  ON (a.SUPPLIER_ID = b.SUPPLIER_ID OR
+      SUBSTR(UPPER(a.SUPPLIER_NAME), 1, 3) = SUBSTR(UPPER(b.SUPPLIER_NAME), 1, 3))
+ AND b.INVOICE_ID > a.INVOICE_ID
+ AND b.INVOICE_DATE BETWEEN a.INVOICE_DATE - 45 AND a.INVOICE_DATE + 45
+ AND ABS(a.AMOUNT - b.AMOUNT) <= GREATEST(a.AMOUNT, b.AMOUNT) * 0.02
+WHERE a.CURRENCY = b.CURRENCY;

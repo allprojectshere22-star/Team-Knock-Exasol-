@@ -1,0 +1,5 @@
+credit_id,supplier_id,credit_date,amount,currency,invoice_id,applied,reason
+CR-005,SUP-001,2026-05-01,1500.00,INR,INV-005,false,Rebate
+CR-006,SUP-002,2026-05-01,1500.00,INR,INV-006,false,Rebate
+CR-007,SUP-003,2026-05-01,1500.00,INR,INV-007,false,Rebate
+CR-100,SUP-001,2026-05-01,900.00,INR,INV-008,true,Rebate

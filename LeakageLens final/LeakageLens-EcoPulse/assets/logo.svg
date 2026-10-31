@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 230 48" width="230" height="48" role="img" aria-label="LeakageLens">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#83e6aa"/><stop offset="1" stop-color="#3fbf7a"/></linearGradient></defs>
+  <rect x="2" y="6" width="36" height="36" rx="10" fill="url(#g)"/>
+  <path d="M20 14 L30 24 L20 34 L10 24 Z" fill="none" stroke="#06150d" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="20" cy="24" r="3" fill="#06150d"/>
+  <text x="48" y="24" font-family="Inter, 'Segoe UI', Arial, sans-serif" font-size="19" font-weight="700" fill="#f4faf6">LeakageLens</text>
+  <text x="49" y="38" font-family="Inter, 'Segoe UI', Arial, sans-serif" font-size="8.5" letter-spacing="1.6" fill="#7f9487">FINANCIAL CONTROL INTELLIGENCE</text>
+</svg>
