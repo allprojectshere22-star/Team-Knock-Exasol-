@@ -7,6 +7,7 @@ Evidence-led supplier payment audits, powered by Exasol SQL.
 - **Event:** ExaThon India 2026
 - **Problem track:** Money, Risk & Regulation
 - Demo video:(https://drive.google.com/drive/folders/1cbyi_4ZnNeNfogrKTpBU8kfvaHGfUxDA?usp=drive_link)
+- ppt:(https://drive.google.com/file/d/14lRmWJ-rB-DC4YlbiYnBmfg3fujaXbcv/view?usp=sharing)
 
 ---
 
