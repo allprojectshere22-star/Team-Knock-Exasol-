@@ -6,8 +6,7 @@ Evidence-led supplier payment audits, powered by Exasol SQL.
 
 - **Event:** ExaThon India 2026
 - **Problem track:** Money, Risk & Regulation
-- **Demo video:** _add link here_
-- **Pitch deck:** [docs/LeakageLens-pitch-deck.pptx](docs/LeakageLens-pitch-deck.pptx)
+- **Demo video:(https://drive.google.com/drive/folders/1cbyi_4ZnNeNfogrKTpBU8kfvaHGfUxDA?usp=drive_link)
 
 ---
 
@@ -152,13 +151,8 @@ LeakageLens calls **no external web APIs**. The only network connection is to yo
 
 Licences are as published by each project; check them before redistributing.
 
-## 9. Demo and supporting materials
 
-- **Demo video:** _add link here_
-- **Demo walkthrough script:** [docs/demo-script.md](docs/demo-script.md)
-- **Pitch deck:** [docs/LeakageLens-pitch-deck.pptx](docs/LeakageLens-pitch-deck.pptx)
-
-## 10. Known limitations
+## 9. Known limitations
 
 - The Exasol path has not been verified against a live Exasol Personal instance (see [Verification status](#verification-status)).
 - Reviewer statuses and notes are kept only for the current session. Exasol stores audit runs, findings and evidence.
